@@ -1,4 +1,4 @@
-module Main exposing (..)
+port module Main exposing (..)
 
 import Browser
 import Html.Styled exposing (..)
@@ -23,9 +23,8 @@ read file =
 
 type alias Model =
   {
-    trials : List Trial
-  , params : Params
-  , files : List FileContent
+    params : Params
+  , meta : List String
   , fileSelect : FileSelect.Model
   , data : Dict String CsvData
   }
@@ -42,22 +41,33 @@ type alias Channel = {
   , points : List Float
   }
 
-init : ( Model, Cmd Msg )
-init =
-    ( initModel, Cmd.none )
+init : Flags -> ( Model, Cmd Msg )
+init flags =
+    ( initModel flags, Cmd.none )
 
-initModel =
-  Model
-    []
-    initParams
-    []
-    FileSelect.init
-    Dict.empty
+initModel flags =
+  let
+    csvData = Dict.fromList flags
+  in
+    Model
+      (initParams flags)
+      []
+      FileSelect.init
+      csvData
 
-initParams =
-  Params
-    (-2000, 2000)
-    Dict.empty
+initParams : Flags -> Params
+initParams flags =
+  let
+    channels_ = List.head flags
+      |> Maybe.map Tuple.second
+      |> Maybe.map (List.map Tuple.first)
+      |> Maybe.withDefault []
+      |> List.map (\ch -> (ch, False))
+      |> Dict.fromList
+  in
+    Params
+      (-2000, 2000)
+      <| channels_
 
 addChannel : String -> Dict String Bool -> Dict String Bool
 addChannel channelName channelSelection =
@@ -77,6 +87,7 @@ type Msg
     | FileContentLoaded String String
     | SelectChannel String Bool
 
+port save : List (String, CsvData) -> Cmd msg
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
@@ -101,23 +112,33 @@ update msg model =
 
     FileContentLoaded name content ->
       let
-        p = model.params
-        parsed = parse content
-        allChannels = List.map Tuple.first parsed
-        params = case String.endsWith ".txt" name of
-          True -> { p | channels = List.foldl addChannel p.channels allChannels}
-          False -> p
-        data = case String.endsWith ".txt" name of
-          True -> Dict.insert name parsed model.data
-          False -> model.data
-        m =
-          { model
-          | files = FileContent name content :: model.files
-          , params = params
-          , data = data
-          }
+        model_ = case String.endsWith ".txt" name of
+          True ->
+            let
+              p = model.params
+              parsed = parse content
+              allChannels = List.map Tuple.first parsed
+              params = { p | channels = List.foldl addChannel p.channels allChannels}
+              data = Dict.insert name parsed model.data
+              m =
+                { model
+                -- | files = FileContent name content :: model.files
+                | params = params
+                , data = data
+                }
+            in
+              m
+
+          False ->
+            case String.endsWith ".vhdr" name of
+              False -> model
+              True ->
+                let
+                  lines = String.split "\n" content
+                in
+                  {model | meta = lines}
       in
-        (m, Cmd.none)
+        (model_, save (Dict.toList model_.data))
 
 parseRow : List String -> Maybe (String, (List String))
 parseRow cells =
@@ -138,24 +159,42 @@ type alias CsvData =
 
 ---- PROGRAM ----
 
+type alias Flags = List (String, CsvData)
 
-main : Program () Model Msg
+main : Program Flags Model Msg
 main =
     Browser.element
         { view = view >> toUnstyled
-        , init = \_ -> init
+        , init = init
         , update = update
         , subscriptions = always Sub.none
         }
 
+meta : List String -> Html Msg
+meta lines = div [] <| List.map (\l -> div [] [text l])lines
 
 view : Model -> Html Msg
 view model =
   div [] [
-    fileSelect model.fileSelect.draggedOver
-  , filesView model
+    graph model
   , channels model.params
+  , meta model.meta
+  , fileSelect model.fileSelect.draggedOver
+  , filesView model
   ]
+
+graph : Model -> Html Msg
+graph model =
+  let
+    selectedChannels = model.params.channels
+      |> Dict.toList
+      |> List.filter Tuple.second
+      |> List.map Tuple.first
+  in
+    div [] [
+      div [] [text "plotting for channels"]
+    , div [] [text <| String.join ", " selectedChannels]
+    ]
 
 channels : Params -> Html Msg
 channels params =
@@ -176,8 +215,6 @@ filesView model =
   div [] [
     h2 [] [text "loaded files"]
   , div [] <| List.map (\f -> div [] [File.name f |> text]) model.fileSelect.files
-  , h2 [] [text "channels"]
-  -- , channels model.files
   ]
 
 type alias FileContent = {
