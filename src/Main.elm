@@ -11,6 +11,7 @@ import Styles
 import File exposing (File)
 import Task
 import Csv
+import Viz
 
 read : File -> Cmd Msg
 read file =
@@ -173,28 +174,67 @@ main =
 meta : List String -> Html Msg
 meta lines = div [] <| List.map (\l -> div [] [text l])lines
 
+
+drawingSectionCss =
+  css [
+    displayFlex
+  , backgroundColor Styles.color.lightGrey
+  ]
+
 view : Model -> Html Msg
 view model =
   div [] [
-    graph model
-  , channels model.params
+    div [drawingSectionCss] [
+      graph model
+    , channels model.params
+    ]
   , meta model.meta
   , fileSelect model.fileSelect.draggedOver
-  , filesView model
   ]
 
 graph : Model -> Html Msg
 graph model =
   let
-    selectedChannels = model.params.channels
+    selectedChannelNames = model.params.channels
       |> Dict.toList
       |> List.filter Tuple.second
       |> List.map Tuple.first
+    conditions = Dict.toList model.data
+    conditionLabels = List.map Tuple.first conditions
+
+    channelsToPlot =
+      List.map Tuple.second conditions -- only data of condition
+      |> List.map -- each condition
+        (List.filter -- each channel
+          (\(name, data) ->
+              List.member name selectedChannelNames
+            )
+        )
+
+    lines =
+        (List.map (List.map (Tuple.mapSecond (List.map String.toFloat))))
+        channelsToPlot
+
   in
-    div [] [
-      div [] [text "plotting for channels"]
-    , div [] [text <| String.join ", " selectedChannels]
+    div [graphCss] [
+      span [] [text "plotting for channels: "]
+    , span [] [text <| String.join ", " selectedChannelNames]
+    , div [] (List.map2 showVizForCondition conditionLabels lines)
     ]
+
+showVizForCondition label lines =
+  div [css [padding (px 10)]] [
+    div [css [padding3 (px 10) (px 0) (px 0), fontWeight bold]] [text label]
+  , div [vizCss] [Viz.view lines |> fromUnstyled]
+  ]
+
+vizCss = css [
+    backgroundColor Styles.color.white
+  ]
+graphCss = css [
+    width (pct 80)
+  ]
+
 
 channels : Params -> Html Msg
 channels params =
@@ -210,24 +250,10 @@ channelCheckbox (name, selected) =
   , label [Attribs.for ("check-" ++ name)] [text name ]
   ]
 
-filesView : Model -> Html Msg
-filesView model =
-  div [] [
-    h2 [] [text "loaded files"]
-  , div [] <| List.map (\f -> div [] [File.name f |> text]) model.fileSelect.files
-  ]
-
 type alias FileContent = {
     name : String
   , content : String
   }
-
-fileStatusCss : Html.Styled.Attribute Msg
-fileStatusCss =
-  css [
-    color (hex "FFF")
-  , padding2 (px 5) (px 10)
-  ]
 
 fileSelect : Bool -> Html Msg
 fileSelect draggedOver =
@@ -236,7 +262,7 @@ fileSelect draggedOver =
   in
     div
       (fileSelectorCss draggedOver :: interactiveAttribs)
-      [text "Click to select or drop WAV, AIF or AIFF files here"]
+      [text "Click to select or drop text or vhdr files here"]
 
 fileSelectorCss : Bool -> Attribute msg
 fileSelectorCss draggedOver = css <| [
