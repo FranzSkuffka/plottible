@@ -3,8 +3,9 @@ port module Main exposing (..)
 import Browser
 import Html.Styled exposing (..)
 import Html.Styled.Attributes as Attribs exposing (src, css, type_, value)
-import Html.Styled.Events exposing (onCheck)
+import Html.Styled.Events exposing (onCheck, onInput)
 import Css exposing (..)
+import Css.Global
 import Dict exposing (Dict)
 import FileSelect exposing (..)
 import Styles
@@ -32,7 +33,7 @@ type alias Model =
 
 type alias Params = {
     range : (Int, Int)
-  , channels : Dict String Bool
+  , channels : ChannelSelection
   }
 
 type alias Trial = List Channel
@@ -63,30 +64,33 @@ initParams flags =
       |> Maybe.map Tuple.second
       |> Maybe.map (List.map Tuple.first)
       |> Maybe.withDefault []
-      |> List.map (\ch -> (ch, False))
+      |> List.map (\ch -> (ch, (False, defaultColor)))
       |> Dict.fromList
   in
     Params
       (-2000, 2000)
       <| channels_
 
-addChannel : String -> Dict String Bool -> Dict String Bool
+type alias ChannelSelection = Dict String (Bool, String)
+
+addChannel : String -> ChannelSelection -> ChannelSelection
 addChannel channelName channelSelection =
   Dict.update channelName
   (\sel ->
     case sel of
-      Just True -> Just True
-      _ -> Just False
+      Just (True, color) -> Just (True, color)
+      _ -> Just (False, defaultColor)
   )
   channelSelection
 
+defaultColor = "#444"
 
 ---- UPDATE ----
 type Msg
     = NoOp
     | FileSelectMsg FileSelect.Msg
     | FileContentLoaded String String
-    | SelectChannel String Bool
+    | SetChannel String Bool String
 
 port save : List (String, CsvData) -> Cmd msg
 
@@ -100,10 +104,10 @@ update msg model =
       in
         ( {model | fileSelect = model_}, cmds )
     NoOp -> (model, Cmd.none)
-    SelectChannel name val ->
+    SetChannel name val color ->
       let
         p = model.params
-        params = {p | channels = Dict.insert name val p.channels}
+        params = {p | channels = Dict.insert name (val, color) p.channels}
         m =
           { model
           | params = params
@@ -118,8 +122,7 @@ update msg model =
             let
               p = model.params
               parsed = parse content
-              allChannels = List.map Tuple.first parsed
-              params = { p | channels = List.foldl addChannel p.channels allChannels}
+              params = { p | channels = addChannels p.channels (allChannels parsed)}
               data = Dict.insert name parsed model.data
               m =
                 { model
@@ -140,6 +143,12 @@ update msg model =
                   {model | meta = lines}
       in
         (model_, save (Dict.toList model_.data))
+
+allChannels : CsvData -> List String
+allChannels = List.map Tuple.first
+
+addChannels :  ChannelSelection -> List String -> ChannelSelection
+addChannels = List.foldl addChannel
 
 parseRow : List String -> Maybe (String, (List String))
 parseRow cells =
@@ -184,7 +193,8 @@ drawingSectionCss =
 view : Model -> Html Msg
 view model =
   div [] [
-    div [drawingSectionCss] [
+    globalStyles model
+  , div [drawingSectionCss] [
       graph model
     , channels model.params
     ]
@@ -192,12 +202,28 @@ view model =
   , fileSelect model.fileSelect.draggedOver
   ]
 
+globalStyles : Model -> Html msg
+globalStyles model =
+  List.filterMap
+    makeChannelStyles
+    (Dict.toList model.params.channels)
+  |> Css.Global.global
+
+
+makeChannelStyles : (String, (Bool, String)) -> Maybe Css.Global.Snippet
+makeChannelStyles (name, (active, color)) =
+  case active of
+    False -> Nothing
+    True -> Just <| Css.Global.class name [
+        property "stroke" color
+      ]
+
 graph : Model -> Html Msg
 graph model =
   let
     selectedChannelNames = model.params.channels
       |> Dict.toList
-      |> List.filter Tuple.second
+      |> List.filter (Tuple.second >> Tuple.first)
       |> List.map Tuple.first
     conditions = Dict.toList model.data
     conditionLabels = List.map Tuple.first conditions
@@ -225,7 +251,7 @@ graph model =
 showVizForCondition label lines =
   div [css [padding (px 10)]] [
     div [css [padding3 (px 10) (px 0) (px 0), fontWeight bold]] [text label]
-  , div [vizCss] [Viz.view lines |> fromUnstyled]
+  , div [vizCss] [Viz.view label lines |> fromUnstyled]
   ]
 
 vizCss = css [
@@ -240,14 +266,17 @@ channels : Params -> Html Msg
 channels params =
   div [] [
     h2 [] [text "Channel selection"]
-  , div [] <| List.map channelCheckbox (Dict.toList params.channels)
+  , div [] <| List.map channelControls (Dict.toList params.channels)
   ]
 
-channelCheckbox : (String, Bool) -> Html Msg
-channelCheckbox (name, selected) =
+channelControls : (String, (Bool, String)) -> Html Msg
+channelControls (name, (selected, color)) =
   div [] [
-    input [Attribs.id ("check-" ++ name), type_ "checkbox", Attribs.checked selected, onCheck (SelectChannel name)] []
+    input [Attribs.id ("check-" ++ name), type_ "checkbox", Attribs.checked selected, onCheck (\checked -> SetChannel name checked color)] []
   , label [Attribs.for ("check-" ++ name)] [text name ]
+  , if selected
+    then input [type_ "color", value color, onInput (SetChannel name selected)] []
+    else text ""
   ]
 
 type alias FileContent = {
