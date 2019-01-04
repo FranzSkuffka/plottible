@@ -8,7 +8,7 @@ const flags = () => {
     return JSON.parse(localStorage.saved)
   } catch (e) {
     console.log(e)
-    return []
+    return null
   }
 }
 
@@ -20,11 +20,27 @@ const app = Elm.Main.init({
 registerServiceWorker();
 
 FileDrop.preventLoad()
-console.log(app.ports.save)
 
 
 const save = data => {
   localStorage.saved = JSON.stringify(data)
 }
 
-app.ports.save.subscribe(save)
+app.ports.save_.subscribe(save)
+
+const clear = () => {
+  localStorage.clear()
+}
+
+app.ports.clear_.subscribe(clear)
+
+const download = svgClasses => {
+  console.log(svgClasses)
+  const svgStrings = svgClasses
+    .map(class_ => document.getElementsByClassName(class_)[0])
+    .map(el => el.outerHTML)
+  console.log(svgStrings)
+  app.ports.startDownloads.send(svgStrings)
+}
+
+app.ports.download_.subscribe(download)

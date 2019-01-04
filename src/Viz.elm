@@ -1,4 +1,4 @@
-module Viz exposing (view)
+module Viz exposing (view, Timeline)
 import Dict exposing (Dict)
 import Shape exposing (linearCurve)
 import Scale
@@ -7,11 +7,12 @@ import TypedSvg.Core exposing (Svg)
 import TypedSvg as SVG exposing (g, svg)
 import TypedSvg.Types exposing (px, Fill(..), Transform(..))
 import TypedSvg.Attributes exposing (d, viewBox, transform)
+import Html.Attributes
 import Path exposing (Path)
 import Statistics
-import Color
 import Maybe.Extra
 import List.Extra
+import Html.Attributes
 
 width = 500
 height = 500
@@ -54,7 +55,7 @@ makeYScale tickCount timelines =
     maximum =
       timelines
       |> List.map (
-        Tuple.second
+        .data
         >> List.map (Maybe.withDefault 0)
         >> List.maximum
         >> Maybe.withDefault 0
@@ -65,7 +66,7 @@ makeYScale tickCount timelines =
     minimum =
       timelines
       |> List.map (
-        Tuple.second
+        .data
         >> List.map (Maybe.withDefault 0)
         >> List.minimum
         >> Maybe.withDefault 0
@@ -77,13 +78,16 @@ makeYScale tickCount timelines =
   in
     yScale
 
-type alias Timeline = (String, List (Maybe Float))
+type alias Timeline = {
+    name : String
+  , color : String
+  , data : List (Maybe Float)
+  }
 
 view : String -> List Timeline -> Svg msg
 view svgId timelines =
   let
     -- STATIC
-    -- stroke = TypedSvg.Attributes.stroke Color.black
     strokeWidth = TypedSvg.Attributes.strokeWidth (px 1)
     fill = TypedSvg.Attributes.fill FillNone
     tickCount = 5
@@ -97,23 +101,29 @@ view svgId timelines =
           g [ transform [ Translate zeroPosition 0 ] ]
             [ Axis.left [ Axis.tickCount tickCount] yScale ]
 
-    drawTimeline =
-      Tuple.second
+    drawTimeline stroke =
+      .data
       >> (drawLine yScale)
       >> Path.toString
       >> d
-      >> (\pathD -> SVG.path [strokeWidth, pathD, fill] [])
+      >> (\pathD -> SVG.path [stroke, strokeWidth, pathD, fill] [])
 
-    paths = List.map drawTimeline timelines
-    labels = List.map Tuple.first timelines
-
-    makePath name p = g [TypedSvg.Attributes.class [name]] [p]
-
-    svgPaths = List.map2 makePath labels paths
+    makePath : Timeline -> Svg msg
+    makePath timeline =
+      let
+        stroke = Html.Attributes.attribute "stroke" timeline.color
+        path = drawTimeline stroke timeline
+      in
+        path
 
   in
-    svg [TypedSvg.Attributes.class [ svgId ], viewBox (0 - 10) (0 - 10) (width + 20) (height + 20)] (svgPaths ++ [axisX, axisY])
-
+    svg [
+      TypedSvg.Attributes.class [ svgId ]
+    , viewBox (0 - 10) (0 - 10) (width + 20) (height + 20)
+    , Html.Attributes.attribute "xmlns" "http://www.w3.org/2000/svg"
+    , Html.Attributes.attribute "xmlns:xlink" "http://www.w3.org/1999/xlink"
+    ]
+    ((List.map makePath timelines) ++ [axisX, axisY])
 axisX =
       g [ transform [ Translate 0 (height / 2) ] ]
         [ Axis.bottom [ Axis.ticks [0, 400, 800, 1024]] xScale ]

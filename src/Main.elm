@@ -10,6 +10,7 @@ import Dict exposing (Dict)
 import FileSelect exposing (..)
 import Styles
 import File exposing (File)
+import File.Download
 import Task
 import Csv
 import Viz
@@ -23,17 +24,39 @@ read file =
 ---- MODEL ----
 
 
+type alias Flags = Maybe Serialized
+
 type alias Model =
   {
-    params : Params
-  , meta : List String
+    meta : List String
   , fileSelect : FileSelect.Model
-  , data : Dict String CsvData
+  , data : Data
+  , selectedChannels : ChannelSelection
   }
 
-type alias Params = {
-    range : (Int, Int)
-  , channels : ChannelSelection
+initModel : Flags -> Model
+initModel flags =
+  let
+    (data, selection) = case flags of
+      Just serialized ->
+        serialized
+        |> Tuple.mapFirst Dict.fromList
+        |> Tuple.mapSecond Dict.fromList
+      Nothing -> (Dict.empty, Dict.empty)
+  in
+    Model
+      []
+      FileSelect.init
+      data
+      selection
+
+type alias Data = Dict String CsvData
+
+type alias MetaData = {
+    samplingRate : Int
+  , zeroSample : Int
+  , xLabel : String
+  , yLabel : String
   }
 
 type alias Trial = List Channel
@@ -46,30 +69,6 @@ type alias Channel = {
 init : Flags -> ( Model, Cmd Msg )
 init flags =
     ( initModel flags, Cmd.none )
-
-initModel flags =
-  let
-    csvData = Dict.fromList flags
-  in
-    Model
-      (initParams flags)
-      []
-      FileSelect.init
-      csvData
-
-initParams : Flags -> Params
-initParams flags =
-  let
-    channels_ = List.head flags
-      |> Maybe.map Tuple.second
-      |> Maybe.map (List.map Tuple.first)
-      |> Maybe.withDefault []
-      |> List.map (\ch -> (ch, (False, defaultColor)))
-      |> Dict.fromList
-  in
-    Params
-      (-2000, 2000)
-      <| channels_
 
 type alias ChannelSelection = Dict String (Bool, String)
 
@@ -91,12 +90,48 @@ type Msg
     | FileSelectMsg FileSelect.Msg
     | FileContentLoaded String String
     | SetChannel String Bool String
+    | Clear
+    | DownloadButtonClicked
+    | DownloadsReady (List String)
 
-port save : List (String, CsvData) -> Cmd msg
+
+save : Model -> Cmd msg
+save model =
+  let
+    data = (Dict.toList model.data)
+    selection = Dict.toList model.selectedChannels
+  in
+    save_ (data, selection)
+
+port save_ : Serialized -> Cmd msg
+port clear_ : () -> Cmd msg
+port download_ : List String -> Cmd msg
+
+port startDownloads : (List String -> msg) -> Sub msg
+
+type alias Serialized = (DataToSave, SelectionToSave)
+type alias DataToSave = List (String, CsvData)
+type alias SelectionToSave = List (String, (Bool, String))
+
+fileNames = Dict.toList >> List.map Tuple.first
+
+svgDownload name content =
+  File.Download.string name "image/svg+xml" content
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
   case msg of
+    Clear -> (initModel Nothing, clear_ ())
+    DownloadButtonClicked -> (model, download_ (fileNames model.data))
+    DownloadsReady contents ->
+      let
+        names =
+          (fileNames model.data)
+          |> List.map (\n -> String.split "." n |> String.join "-")
+        downloads = List.map2 svgDownload names contents
+
+      in
+        (model, Cmd.batch downloads)
     FileSelectMsg msg_ ->
       let
         (model_, cmd) = FileSelect.update FileSelectMsg ["text/vhdr"] msg_ model.fileSelect
@@ -106,49 +141,46 @@ update msg model =
     NoOp -> (model, Cmd.none)
     SetChannel name val color ->
       let
-        p = model.params
-        params = {p | channels = Dict.insert name (val, color) p.channels}
-        m =
-          { model
-          | params = params
+        model_ = { model
+          | selectedChannels = Dict.insert name (val, color) model.selectedChannels
           }
       in
-        (m, Cmd.none)
+        (model_, save model_)
 
     FileContentLoaded name content ->
       let
-        model_ = case String.endsWith ".txt" name of
-          True ->
+        model_ = case String.split "." name of
+          [_, "txt"] ->
             let
-              p = model.params
-              parsed = parse content
-              params = { p | channels = addChannels p.channels (allChannels parsed)}
-              data = Dict.insert name parsed model.data
-              m =
-                { model
-                -- | files = FileContent name content :: model.files
-                | params = params
-                , data = data
-                }
+              parsed = parseCsv content
             in
-              m
+              { model
+              | selectedChannels = addChannels parsed model.selectedChannels
+              , data = Dict.insert name parsed model.data
+              }
 
-          False ->
-            case String.endsWith ".vhdr" name of
-              False -> model
-              True ->
-                let
-                  lines = String.split "\n" content
-                in
-                  {model | meta = lines}
+          [_, "vhdr"] ->
+            let
+              lines = String.split "\n" content
+            in
+              {model | meta = lines}
+
+          [_, "vmrk"] ->
+            let
+              lines = String.split "\n" content
+            in
+              {model | meta = lines}
+          _ -> model
       in
-        (model_, save (Dict.toList model_.data))
+        (model_, save model_)
 
 allChannels : CsvData -> List String
 allChannels = List.map Tuple.first
 
-addChannels :  ChannelSelection -> List String -> ChannelSelection
-addChannels = List.foldl addChannel
+addChannels :  CsvData -> ChannelSelection -> ChannelSelection
+addChannels data selection =
+  allChannels data
+  |> List.foldl addChannel selection
 
 parseRow : List String -> Maybe (String, (List String))
 parseRow cells =
@@ -157,8 +189,8 @@ parseRow cells =
     head :: tail -> Just (head, tail)
     _ -> Nothing
 
-parse : String -> CsvData
-parse content =
+parseCsv : String -> CsvData
+parseCsv content =
     String.split "\n" content
       |> List.map (String.split ",")
       |> List.map parseRow
@@ -169,15 +201,13 @@ type alias CsvData =
 
 ---- PROGRAM ----
 
-type alias Flags = List (String, CsvData)
-
 main : Program Flags Model Msg
 main =
     Browser.element
         { view = view >> toUnstyled
         , init = init
         , update = update
-        , subscriptions = always Sub.none
+        , subscriptions = always (startDownloads DownloadsReady)
         }
 
 meta : List String -> Html Msg
@@ -193,20 +223,32 @@ drawingSectionCss =
 view : Model -> Html Msg
 view model =
   div [] [
-    globalStyles model
+    button [onClick (always DownloadButtonClicked)] [ text "download all" ]
+  -- , globalStyles model
   , div [drawingSectionCss] [
       graph model
-    , channels model.params
+    , channelsPanel model.selectedChannels
     ]
   , meta model.meta
+  , loadedData model.data
   , fileSelect model.fileSelect.draggedOver
+  , button [onClick (always Clear)] [ text "clear all" ]
   ]
+
+loadedData : Data -> Html msg
+loadedData data=
+  let
+    names = Dict.toList data
+      |> List.map Tuple.first
+      |> List.map (\name -> div [] [text name])
+  in
+    div [] names
 
 globalStyles : Model -> Html msg
 globalStyles model =
   List.filterMap
     makeChannelStyles
-    (Dict.toList model.params.channels)
+    (Dict.toList model.selectedChannels)
   |> Css.Global.global
 
 
@@ -221,10 +263,16 @@ makeChannelStyles (name, (active, color)) =
 graph : Model -> Html Msg
 graph model =
   let
-    selectedChannelNames = model.params.channels
+    selectedChannels = model.selectedChannels
       |> Dict.toList
       |> List.filter (Tuple.second >> Tuple.first)
+
+    selectedChannelNames = selectedChannels
       |> List.map Tuple.first
+
+    selectedChannelColors = selectedChannels
+      |> List.map (Tuple.second >> Tuple.second)
+
     conditions = Dict.toList model.data
     conditionLabels = List.map Tuple.first conditions
 
@@ -241,11 +289,18 @@ graph model =
         (List.map (List.map (Tuple.mapSecond (List.map String.toFloat))))
         channelsToPlot
 
+    timelines =
+      List.map
+        (List.map2
+          (\color (name, data) -> Viz.Timeline name color data)
+          selectedChannelColors)
+        lines
+
   in
     div [graphCss] [
       span [] [text "plotting for channels: "]
     , span [] [text <| String.join ", " selectedChannelNames]
-    , div [] (List.map2 showVizForCondition conditionLabels lines)
+    , div [] (List.map2 showVizForCondition conditionLabels timelines)
     ]
 
 showVizForCondition label lines =
@@ -262,11 +317,11 @@ graphCss = css [
   ]
 
 
-channels : Params -> Html Msg
-channels params =
+channelsPanel : ChannelSelection -> Html Msg
+channelsPanel channelSelection =
   div [] [
     h2 [] [text "Channel selection"]
-  , div [] <| List.map channelControls (Dict.toList params.channels)
+  , div [] <| List.map channelControls (Dict.toList channelSelection)
   ]
 
 channelControls : (String, (Bool, String)) -> Html Msg
