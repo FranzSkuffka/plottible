@@ -31,24 +31,11 @@ type alias Model =
     meta : List String
   , fileSelect : FileSelect.Model
   , data : Data
-  , selectedChannels : ChannelSelection
+  , selectedChannels : Selection
+  , selectedConditions : Selection
   }
 
-initModel : Flags -> Model
-initModel flags =
-  let
-    (data, selection) = case flags of
-      Just serialized ->
-        serialized
-        |> Tuple.mapFirst Dict.fromList
-        |> Tuple.mapSecond Dict.fromList
-      Nothing -> (Dict.empty, Dict.empty)
-  in
-    Model
-      []
-      FileSelect.init
-      data
-      selection
+type alias Selection = Dict String (Bool, String)
 
 type alias Data = Dict String CsvData
 
@@ -59,20 +46,37 @@ type alias MetaData = {
   , yLabel : String
   }
 
-type alias Trial = List Channel
+type alias Trial = List ChannelData
 
-type alias Channel = {
+type alias ChannelData = {
     name : String
   , points : List Float
   }
+
+initModel : Flags -> Model
+initModel flags =
+  let
+    (data, channelSelection) = case flags of
+      Just serialized ->
+        serialized
+        |> Tuple.mapFirst Dict.fromList
+        |> Tuple.mapSecond Dict.fromList
+      Nothing -> (Dict.empty, Dict.empty)
+    conditionSelection = Dict.empty
+  in
+    Model
+      []
+      FileSelect.init
+      data
+      channelSelection
+      conditionSelection
 
 init : Flags -> ( Model, Cmd Msg )
 init flags =
     ( initModel flags, Cmd.none )
 
-type alias ChannelSelection = Dict String (Bool, String)
 
-addChannel : String -> ChannelSelection -> ChannelSelection
+addChannel : String -> Selection -> Selection
 addChannel channelName channelSelection =
   Dict.update channelName
   (\sel ->
@@ -89,7 +93,7 @@ type Msg
     = NoOp
     | FileSelectMsg FileSelect.Msg
     | FileContentLoaded String String
-    | SetChannel String Bool String
+    | Set ChannelOrCondition String Bool String
     | Clear
     | DownloadButtonClicked
     | DownloadsReady (List String)
@@ -139,11 +143,21 @@ update msg model =
       in
         ( {model | fileSelect = model_}, cmds )
     NoOp -> (model, Cmd.none)
-    SetChannel name val color ->
+
+    -- when the user clicks a channel or changes the name
+    Set what name val color ->
       let
-        model_ = { model
-          | selectedChannels = Dict.insert name (val, color) model.selectedChannels
-          }
+        _ = Debug.log "what" what
+
+        model_ = case what of
+            Channel ->
+              { model
+              | selectedChannels = Dict.insert name (val, color) model.selectedChannels
+              }
+            Condition ->
+              { model
+              | selectedConditions = Dict.insert name (val, color) model.selectedConditions
+              }
       in
         (model_, save model_)
 
@@ -156,6 +170,7 @@ update msg model =
             in
               { model
               | selectedChannels = addChannels parsed model.selectedChannels
+              , selectedConditions = addCondition name model.selectedConditions
               , data = Dict.insert name parsed model.data
               }
 
@@ -177,7 +192,14 @@ update msg model =
 allChannels : CsvData -> List String
 allChannels = List.map Tuple.first
 
-addChannels :  CsvData -> ChannelSelection -> ChannelSelection
+addCondition : String -> Selection -> Selection
+addCondition name selection =
+  Dict.update name (\sel -> case sel of
+    Just a -> Just a
+    Nothing -> Just (False, "000")
+  ) selection
+
+addChannels :  CsvData -> Selection -> Selection
 addChannels data selection =
   allChannels data
   |> List.foldl addChannel selection
@@ -197,8 +219,10 @@ parseCsv content =
       |> List.filterMap identity
 
 type alias CsvData =
-  List (String, List String)
+  List (RowLabel, List CellData)
 
+type alias CellData = String
+type alias RowLabel = String
 ---- PROGRAM ----
 
 main : Program Flags Model Msg
@@ -218,6 +242,7 @@ drawingSectionCss =
   css [
     displayFlex
   , backgroundColor Styles.color.lightGrey
+  , maxWidth (px 500)
   ]
 
 view : Model -> Html Msg
@@ -228,6 +253,7 @@ view model =
   , div [drawingSectionCss] [
       graph model
     , channelsPanel model.selectedChannels
+    , conditionsPanel model.selectedConditions
     ]
   , meta model.meta
   , loadedData model.data
@@ -260,12 +286,32 @@ makeChannelStyles (name, (active, color)) =
         property "stroke" color
       ]
 
+type alias ChannelName = String
+type alias HexColor = String
+
+getSelectedChannels : Model -> List ( ChannelName, ( Bool, HexColor ) )
+getSelectedChannels =
+  .selectedChannels
+  >> Dict.toList
+  >> List.filter (Tuple.second >> Tuple.first)
+
+
+getChannelsToPlot conditions selectedChannelNames =
+  -- get the data of each condition only
+  List.map Tuple.second conditions -- only DATA of condition
+  -- in each data set
+  |> List.map -- each condition
+  -- only keep the data set if it's name is in the selected channels
+    (List.filter -- each channel
+      (\(name, data) ->
+          List.member name selectedChannelNames
+        )
+    )
+
 graph : Model -> Html Msg
 graph model =
   let
-    selectedChannels = model.selectedChannels
-      |> Dict.toList
-      |> List.filter (Tuple.second >> Tuple.first)
+    selectedChannels = getSelectedChannels model
 
     selectedChannelNames = selectedChannels
       |> List.map Tuple.first
@@ -273,17 +319,11 @@ graph model =
     selectedChannelColors = selectedChannels
       |> List.map (Tuple.second >> Tuple.second)
 
+    -- each loaded data set in the model equals one condition
     conditions = Dict.toList model.data
-    conditionLabels = List.map Tuple.first conditions
 
-    channelsToPlot =
-      List.map Tuple.second conditions -- only data of condition
-      |> List.map -- each condition
-        (List.filter -- each channel
-          (\(name, data) ->
-              List.member name selectedChannelNames
-            )
-        )
+    conditionLabels = List.map Tuple.first conditions
+    channelsToPlot = getChannelsToPlot conditions selectedChannelNames
 
     lines =
         (List.map (List.map (Tuple.mapSecond (List.map String.toFloat))))
@@ -293,8 +333,8 @@ graph model =
       List.map
         (List.map2
           (\color (name, data) -> Viz.Timeline name color data)
-          selectedChannelColors)
-        lines
+          selectedChannelColors
+        ) lines
 
   in
     div [graphCss] [
@@ -303,6 +343,7 @@ graph model =
     , div [] (List.map2 showVizForCondition conditionLabels timelines)
     ]
 
+showVizForCondition : String -> List Viz.Timeline -> Html msg
 showVizForCondition label lines =
   div [css [padding (px 10)]] [
     div [css [padding3 (px 10) (px 0) (px 0), fontWeight bold]] [text label]
@@ -317,20 +358,29 @@ graphCss = css [
   ]
 
 
-channelsPanel : ChannelSelection -> Html Msg
+channelsPanel : Selection -> Html Msg
 channelsPanel channelSelection =
   div [] [
     h2 [] [text "Channel selection"]
-  , div [] <| List.map channelControls (Dict.toList channelSelection)
+  , div [] <| List.map (controls Channel) (Dict.toList channelSelection)
   ]
 
-channelControls : (String, (Bool, String)) -> Html Msg
-channelControls (name, (selected, color)) =
+conditionsPanel : Selection -> Html Msg
+conditionsPanel channelSelection =
   div [] [
-    input [Attribs.id ("check-" ++ name), type_ "checkbox", Attribs.checked selected, onCheck (\checked -> SetChannel name checked color)] []
+    h2 [] [text "Condition selection"]
+  , div [] <| List.map (controls Condition) (Dict.toList channelSelection)
+  ]
+
+type ChannelOrCondition = Channel | Condition
+
+controls : ChannelOrCondition -> (String, (Bool, String)) -> Html Msg
+controls what (name, (selected, color)) =
+  div [] [
+    input [Attribs.id ("check-" ++ name), type_ "checkbox", Attribs.checked selected, onCheck (\checked -> Set what name checked color)] []
   , label [Attribs.for ("check-" ++ name)] [text name ]
   , if selected
-    then input [type_ "color", value color, onInput (SetChannel name selected)] []
+    then input [type_ "color", value color, onInput (Set what name selected)] []
     else text ""
   ]
 
